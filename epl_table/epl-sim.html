@@ -1,0 +1,122 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EPL weekend table simulator</title>
+<style>
+:root{color-scheme:light dark;font:14px/1.45 system-ui,sans-serif}
+body{max-width:980px;margin:1.5rem auto;padding:0 1rem}
+table{border-collapse:collapse;width:100%}
+td,th{padding:3px 8px;text-align:left;border-bottom:1px solid #8884}
+td:nth-child(n+3){font-variant-numeric:tabular-nums}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem}
+@media(max-width:700px){.cols{grid-template-columns:1fr}}
+input{width:4.5em}
+.up{color:#2a9d4a}.dn{color:#d6453d}
+#err{color:#d6453d;white-space:pre-wrap}
+</style>
+<h2>Weekend table simulator</h2>
+<div id="err"></div>
+<p>Odds are averaged across bookmakers with the margin removed. Edit any percentage to override it (each row is renormalised).</p>
+<div id="odds"></div>
+<p><button onclick="go(-1)">Previous</button> <button onclick="go(1)">Next</button> <span id="pg"></span></p>
+<div class="cols" id="out"></div>
+<p><small>* tied on points with the team below; that order uses a placeholder goal difference (win +1, loss −1). Each table is an exact outcome: its order and points.</small></p>
+<script>
+const ODDS_KEY="ae1215ce419650130a7ef55a4328d405", FD_KEY="db0c18e79f134108966c103c17a260e9";
+// Both APIs use full club names, so after stripping "FC"/"AFC" most match as is. Add any odd one here.
+const AL={"man city":"manchester city","man united":"manchester united","spurs":"tottenham hotspur","wolves":"wolverhampton wanderers"};
+const $=s=>document.querySelector(s);
+const nm=s=>{s=s.toLowerCase().replace(/&/g," and ").replace(/\b(afc|fc)\b/g,"").replace(/[^a-z ]/g,"").replace(/\s+/g," ").trim();return AL[s]||s};
+const day=t=>new Date(t).toLocaleDateString("en-GB",{timeZone:"Europe/London",weekday:"short"});
+let teams,M,split,res,page=0;
+
+async function load(){
+  const [o,s]=await Promise.all([
+    fetch(`https://api.the-odds-api.com/v4/sports/soccer_epl/odds/?apiKey=${ODDS_KEY}&regions=uk&markets=h2h&oddsFormat=decimal`),
+    fetch("https://api.football-data.org/v4/competitions/PL/standings",{headers:{"X-Auth-Token":FD_KEY}})]);
+  if(!o.ok||!s.ok) throw Error(`odds HTTP ${o.status}, standings HTTP ${s.status}`);
+  console.log("odds credits left:",o.headers.get("x-requests-remaining"));
+  const sd=await s.json();
+  const rows=sd.standings.find(x=>x.type=="TOTAL").table.sort((a,b)=>a.position-b.position);
+  teams=rows.map(r=>({n:nm(r.team.name),label:r.team.shortName||r.team.name,pts:r.points,gd:r.goalDifference}));
+  const idx=Object.fromEntries(teams.map((t,i)=>[t.n,i])), bad=[];
+  const ev=(await o.json()).sort((a,b)=>a.commence_time<b.commence_time?-1:1).slice(0,10);
+  M=ev.map(e=>{
+    const h=idx[nm(e.home_team)],a=idx[nm(e.away_team)];
+    if(h==null) bad.push(e.home_team); if(a==null) bad.push(e.away_team);
+    const acc=[0,0,0]; let n=0;
+    for(const b of e.bookmakers){
+      const m=b.markets.find(k=>k.key=="h2h"); if(!m) continue;
+      const pr=[e.home_team,"Draw",e.away_team].map(x=>1/m.outcomes.find(o=>o.name==x)?.price);
+      const sum=pr[0]+pr[1]+pr[2]; if(!isFinite(sum)) continue;
+      pr.forEach((v,i)=>acc[i]+=v/sum); n++;
+    }
+    if(!n) bad.push("no odds: "+e.home_team+" v "+e.away_team);
+    return {h,a,day:day(e.commence_time),p:acc.map(v=>v/n)};
+  });
+  if(bad.length) throw Error("Unmatched names, add them to AL:\n"+bad.join("\n"));
+  const si=M.findIndex(m=>m.day=="Sun"); split=si<0?M.length:si;
+}
+
+// 0 = home win, 1 = draw, 2 = away win; returns every outcome with its probability
+function expand(ms,pts,gd){
+  let L=[{p:1,pts,gd}];
+  for(const m of ms){const N=[];
+    for(const o of L)for(let r=0;r<3;r++){
+      const P=o.pts.slice(),G=o.gd.slice();
+      if(r==0){P[m.h]+=3;G[m.h]++;G[m.a]--}
+      else if(r==1){P[m.h]++;P[m.a]++}
+      else{P[m.a]+=3;G[m.a]++;G[m.h]--}
+      N.push({p:o.p*m.p[r],pts:P,gd:G});
+    }
+    L=N;
+  }
+  return L;
+}
+// current position = index in teams, so it doubles as the last tiebreak
+const rank=(P,G)=>teams.map((_,i)=>i).sort((x,y)=>P[y]-P[x]||G[y]-G[x]||x-y);
+function group(L){
+  const g=new Map();
+  for(const o of L){
+    const r=rank(o.pts,o.gd),k=r.map(i=>i+":"+o.pts[i]).join();
+    let e=g.get(k); if(!e) g.set(k,e={r,P:o.pts,p:0,mem:[]});
+    e.p+=o.p; e.mem.push(o);
+  }
+  return [...g.values()].sort((a,b)=>b.p-a.p);
+}
+
+function run(){
+  const z=teams.map(()=>0);
+  const Ms=M.map(m=>{const s=m.p[0]+m.p[1]+m.p[2];return {...m,p:m.p.map(v=>v/s)}});
+  const D=expand(Ms.slice(split),z,z); // second-stage outcomes as deltas
+  res=group(expand(Ms.slice(0,split),teams.map(t=>t.pts),teams.map(t=>t.gd))).slice(0,10).map(a=>{
+    const L=[];
+    for(const o of a.mem)for(const d of D)
+      L.push({p:o.p*d.p,pts:o.pts.map((v,i)=>v+d.pts[i]),gd:o.gd.map((v,i)=>v+d.gd[i])});
+    const b=group(L)[0];
+    return {a,b:{...b,p:b.p/a.p}};
+  });
+  page=0; show();
+}
+
+const tb=(g,h)=>`<div><h3>${h}</h3><table>`+g.r.map((t,i)=>{
+  const mv=t-i, tie=i<19&&g.P[t]==g.P[g.r[i+1]];
+  return `<tr><td>${i+1}</td><td>${teams[t].label}</td><td>${g.P[t]}${tie?"*":""}</td><td class="${mv>0?"up":"dn"}">${mv?(mv>0?"▲":"▼")+Math.abs(mv):""}</td></tr>`;
+}).join("")+"</table></div>";
+
+function show(){
+  const r=res[page], s1=M.slice(0,split);
+  $("#pg").textContent=`Table ${page+1} of ${res.length}. Chance of this first table: ${(r.a.p*100).toFixed(2)}%. Most likely second table given it: ${(r.b.p*100).toFixed(1)}%.`;
+  $("#out").innerHTML=tb(r.a,"After "+(s1.length?s1.at(-1).day:"now"))+tb(r.b,"After "+M.at(-1).day);
+}
+const go=d=>{page=(page+d+res.length)%res.length;show()};
+
+function drawOdds(){
+  $("#odds").innerHTML="<table><tr><th>Day<th>Match<th>Home %<th>Draw %<th>Away %</tr>"+M.map((m,i)=>
+    `<tr><td>${m.day}<td>${teams[m.h].label} v ${teams[m.a].label}`+
+    m.p.map((v,k)=>`<td><input value="${(v*100).toFixed(1)}" onchange="M[${i}].p[${k}]=this.value/100;run()">`).join("")
+  ).join("")+"</table>";
+}
+
+load().then(()=>{drawOdds();run()}).catch(e=>$("#err").textContent=e.message);
+</script>
