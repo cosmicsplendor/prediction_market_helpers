@@ -1,7 +1,8 @@
 // Run: ODDS_KEY=... FD_KEY=... node index.js   (Node 18+), then open http://localhost:3000
 // Keep this file and epl-sim.html in the same folder.
+const config = require("./config.json")
 const http = require("http"), fs = require("fs");
-const { ODDS_KEY, FD_KEY } = process.env;
+const { ODDS_KEY, FD_KEY } = config;
 if (!ODDS_KEY || !FD_KEY) { console.error("Set ODDS_KEY and FD_KEY first."); process.exit(1); }
 
 const SRC = {
